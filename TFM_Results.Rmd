@@ -1,0 +1,241 @@
+---
+title: "TFM_Results"
+author: "Jon Ortiz Abalia"
+date: "2 de mayo de 2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readxl)
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library(Biobase)
+library(dplyr)
+library(openxlsx)
+library(knitr) # for kable()
+library(kableExtra)
+```
+
+```{r}
+# Establezco el directorio de trabajo
+
+setwd("C:/Users/Usuario/Desktop/UOC/TFM/carles_barcelo/RStudio/GSEA")
+
+# Cargo el archivo del dataset
+
+datos<-read_excel("RESULTS.xlsx", sheet=3, col_types = c("text", "text","text","text","text","numeric"))
+
+head(datos)
+```
+
+# Annotation of gene names. Addition of columns 'Entrez_ID' and 'Gene_Name' 
+
+```{r}
+
+GeneCol<- as.character(datos$GENE)
+
+datos$EntrezID<-mapIds(org.Hs.eg.db, GeneCol, "ENTREZID", "SYMBOL")
+
+datos$Gene_Name<-mapIds(org.Hs.eg.db, GeneCol, "GENENAME", "SYMBOL")
+
+
+```
+
+# Creation of a new column called 'COMMON_GENE' which contains information on whether a gene is deregulated (or not) in both cancers: 'Yes' or 'No' 
+
+
+```{r}
+
+datos<-datos %>% 
+  group_by(GENE) %>%
+  mutate(COMMON_GENE = case_when(any(CANCER_TYPE=='BC') & any(CANCER_TYPE=='MCL') ~ "YES", TRUE ~ "NO"))
+
+# List of unique genes shared by BC and MCL
+
+common_genes<-distinct(datos[which(datos$COMMON_GENE=='YES'),], GENE)
+
+
+```
+
+# Creation of new columns with the information of in how many datasets, in how many BC datasets and in how many MCL datasets the common gene has been found deregulated
+
+
+```{r}
+
+## TOTAL DATASETS
+
+# Create table with each gene and number of total datasets in which the gene has been found deregulated
+
+table1<-datos %>% 
+  filter(COMMON_GENE=='YES') %>% 
+  group_by(GENE) %>%
+  tally()
+
+names(table1)[2]<-'NUM_DATASETS'
+
+# Create the corresponding column with the information of total datasets
+
+datos2<-datos %>% 
+  filter(COMMON_GENE=='YES') %>% 
+  group_by(GENE) %>%
+  mutate(DATASETS_TOT= n())
+
+## BC DATASETS
+
+# Create table with each gene and number of BC datasets in which the gene has been found deregulated
+
+table2<-datos %>% 
+  filter(COMMON_GENE=='YES' & CANCER_TYPE=='BC') %>% 
+  group_by(GENE) %>%
+  tally()
+
+names(table2)[2]<-'BC_DATASETS'
+
+
+## MCL DATASETS
+
+# Create table with each gene and number of BC datasets in which the gene has been found deregulated
+
+table3<-datos %>% 
+  filter(COMMON_GENE=='YES' & CANCER_TYPE=='MCL') %>% 
+  group_by(GENE) %>%
+  tally()
+
+names(table3)[2]<-'MCL_DATASETS'
+
+# Join tables
+
+datos2<-merge(datos2, table2, by="GENE",all.x=TRUE)
+datos2<-merge(datos2, table3, by="GENE",all.x=TRUE)
+
+```
+
+# New columns to record the informarion of the number of datasets in which the gene has been upregulated, downregulated in both cancer types and in total
+
+
+```{r}
+
+# Number of total datasets in which the gene has been found upregulated
+
+table4<-datos2 %>% 
+  filter(`UP/DOWNREGULATED`=='UP') %>%
+  group_by(GENE) %>%
+  tally()
+
+names(table4)[2]<-'TOT_UPREGULATED'
+
+# Number of total datasets in which the gene has been found downpregulated
+
+table5<-datos2 %>% 
+  filter(`UP/DOWNREGULATED`=='DOWN') %>%
+  group_by(GENE) %>%
+  tally()
+
+names(table5)[2]<-'TOT_DOWNREGULATED'
+
+# Number of BC datasets in which the gene has been found UPpregulated
+
+table6<-datos2 %>% 
+  filter(`UP/DOWNREGULATED`=='UP' & CANCER_TYPE=='BC') %>%
+  group_by(GENE) %>%
+  tally()
+
+names(table6)[2]<-'BC_UPREGULATED'
+
+# Number of BC datasets in which the gene has been found downpregulated
+
+table7<-datos2 %>% 
+  filter(`UP/DOWNREGULATED`=='DOWN' & CANCER_TYPE=='BC') %>%
+  group_by(GENE) %>%
+  tally()
+
+names(table7)[2]<-'BC_DOWNREGULATED'
+
+# Number of MCL datasets in which the gene has been found UPpregulated
+
+table8<-datos2 %>% 
+  filter(`UP/DOWNREGULATED`=='UP' & CANCER_TYPE=='MCL') %>%
+  group_by(GENE) %>%
+  tally()
+
+names(table8)[2]<-'MCL_UPREGULATED'
+
+# Number of MCL datasets in which the gene has been found downpregulated
+
+table9<-datos2 %>% 
+  filter(`UP/DOWNREGULATED`=='DOWN' & CANCER_TYPE=='MCL') %>%
+  group_by(GENE) %>%
+  tally()
+
+names(table9)[2]<-'MCL_DOWNREGULATED'
+
+# Join tables 
+
+
+datos2<-merge(datos2, table4, by="GENE",all.x=TRUE)
+datos2<-merge(datos2, table5, by="GENE",all.x=TRUE)
+datos2<-merge(datos2, table6, by="GENE",all.x=TRUE)
+datos2<-merge(datos2, table7, by="GENE",all.x=TRUE)
+datos2<-merge(datos2, table8, by="GENE",all.x=TRUE)
+datos2<-merge(datos2, table9, by="GENE",all.x=TRUE)
+
+# Replace NA values by '0'
+
+datos2$TOT_UPREGULATED[which(is.na(datos2$TOT_UPREGULATED))]<-0
+datos2$TOT_DOWNREGULATED[which(is.na(datos2$TOT_DOWNREGULATED))]<-0
+datos2$BC_UPREGULATED[which(is.na(datos2$BC_UPREGULATED))]<-0
+datos2$BC_DOWNREGULATED[which(is.na(datos2$BC_DOWNREGULATED))]<-0
+datos2$MCL_UPREGULATED[which(is.na(datos2$MCL_UPREGULATED))]<-0
+datos2$MCL_DOWNREGULATED[which(is.na(datos2$MCL_DOWNREGULATED))]<-0
+
+
+```
+
+# Analyze gene sets
+
+
+```{r}
+
+datos3<-distinct(datos2, GENE, GENE_SET)
+
+table(datos3$GENE_SET)
+
+```
+
+# Createnew file deleting columns
+
+\newpage
+
+```{r echo=FALSE}
+
+datos_def<-distinct(datos2, GENE, .keep_all=TRUE)
+datos_def<-datos_def[,-c(2,3,4,5,9)]
+
+table<-datos_def[,c(1,3,4)]
+
+kable(table,format='latex', booktabs=T, align='lll', longtable=TRUE) %>%
+  row_spec(0, bold=TRUE) %>%
+  kable_styling(full_width=F, latex_options = c("hold_position", "repeat_header"))
+
+
+```
+
+# Exports
+
+```{r}
+write.xlsx(datos2, file = "gene_Signature.xlsx",sheetName = "annot", append = FALSE)
+
+write.xlsx(datos, file = "gsea_results.xlsx",sheetName = "annot", append = FALSE)
+
+write.xlsx(datos_def, file = "common_genes.xlsx",sheetName = "annot", append = FALSE)
+
+
+```
+
+
+
+

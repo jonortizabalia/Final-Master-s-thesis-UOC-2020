@@ -1,0 +1,1397 @@
+---
+title: "TFM_Bioportal"
+author: "Jon Ortiz Abalia"
+date: "13 de junio de 2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(utils)
+library(openxlsx)
+library(data.table)  # transpose
+library(stringr)
+library(VIM)
+library(corrplot)
+library(dplyr)
+library(randomForest)
+library(caret)
+library(fastDummies)
+```
+
+```{r}
+# Establezco el directorio de trabajo
+
+setwd("C:/Users/Usuario/Desktop/UOC/TFM/carles_barcelo/RStudio")
+
+# Cargo el archivo del dataset
+
+# datos_RNA<-read.delim("data_RNA_Seq_v2_expression_median.txt", sep="\t", dec=".",na.strings=c("","NA"))
+# datos_RNA<-read.delim("data_RNA_Seq_v2_mRNA_median_Zscores.txt", sep="\t", dec=".",na.strings=c("","NA"))
+datos_RNA<-read.delim("data_RNA_Seq_v2_mRNA_median_all_sample_Zscores.txt", sep="\t", dec=".",na.strings=c("","NA"))
+
+datos_samples<-read.delim("data_clinical_sample.txt", sep="\t",na.strings=c("","NA"))
+datos_patients<-read.delim("data_clinical_patient.txt", sep="\t",na.strings=c("","NA"))
+
+head(datos_RNA)
+head(datos_samples)
+head(datos_patients)
+
+str(datos_RNA)
+
+# Id of MIEN1
+
+#datos_RNA[which(datos_RNA$Entrez_Gene_Id==84299),]
+
+```
+
+# Import the list of genes included in '53-CSC-gene signature'
+
+```{r}
+
+datos_geneSign<-read.xlsx("53_gene_signature.xlsx", sheet=1)
+# datos_geneSign<-read.xlsx("6_gene_signature_ZUO.xlsx", sheet=1)
+# datos_geneSign<-read.xlsx("12_gene_signature_PEI.xlsx", sheet=1)
+# datos_geneSign<-read.xlsx("20_gene_signature_PECE.xlsx", sheet=1)
+
+head(datos_geneSign)
+
+str(datos_geneSign)
+
+# Quito los espacios en blanco antes y después del nombre del gen
+
+datos_geneSign$Gene<-trimws(datos_geneSign$Gene, which = c("both"))
+
+# Cambio el nombre de "MIEN1" a "C17orf37"
+
+datos_geneSign$Gene[which(datos_geneSign$Gene=='MIEN1')]<-"C17orf37"
+
+# Hago un merge con "datos_RNA"
+
+RNA_geneSign<-merge(x=datos_geneSign, y=datos_RNA, by.x="Gene", by.y="Hugo_Symbol", all.x=TRUE)
+
+# Paso las columnas (variables de las muestras) a filas
+
+t1<-transpose(RNA_geneSign)
+
+# Renombro filas y columnas
+
+colnames(RNA_geneSign)
+rownames(RNA_geneSign)
+
+rownames(t1)<-colnames(RNA_geneSign)
+colnames(t1)<-RNA_geneSign$Gene
+
+t1$Samples<-rownames(t1)
+
+datos_exp<-t1[-c(1,2),]
+rownames(datos_exp)<-NULL
+
+# Reemplazo "." por "-" en los nombres de las muestras
+
+datos_exp$Samples <- str_replace_all(datos_exp$Samples,'\\.', '-')
+
+
+```
+
+# Merge with tables "datos_samples" and "datos_patients"
+
+```{r}
+
+# Merge con "datos_samples"
+
+colnames(datos_samples)
+
+datos_exp<-merge(x=datos_exp, y=datos_samples[,c("SAMPLE_ID","PATIENT_ID")], by.x="Samples", by.y="SAMPLE_ID", all.x=TRUE)
+
+# Merge con "datos_patients"
+
+colnames(datos_patients)
+datos_exp<-merge(x=datos_exp, y=datos_patients[,c("PATIENT_ID","AGE","SEX","AJCC_PATHOLOGIC_TUMOR_STAGE","WEIGHT", "OS_STATUS","OS_MONTHS","DSS_STATUS","DSS_MONTHS","DFS_STATUS","DFS_MONTHS","PFS_STATUS","PFS_MONTHS")], by.x="PATIENT_ID", by.y="PATIENT_ID", all.x=TRUE)
+
+table(datos_exp$OS_STATUS)
+
+# I select only "DECEASED"
+
+datos_tot<-datos_exp
+
+table(datos_tot$PFS_STATUS)
+table(datos_tot$DSS_STATUS)
+
+# I select only "DECEASED"
+
+datos_exp<-datos_exp[which(datos_exp$OS_STATUS=="1:DECEASED"),]
+
+```
+
+
+# Analysis of missing values
+
+```{r}
+
+# Variables clínicas
+
+colnames(datos_exp)
+
+sapply(datos_exp[,c("AGE","SEX","WEIGHT","AJCC_PATHOLOGIC_TUMOR_STAGE","OS_STATUS","OS_MONTHS","DSS_STATUS","DSS_MONTHS","DFS_STATUS","DFS_MONTHS","PFS_STATUS","PFS_MONTHS")], function(x) sum(is.na(x)))
+
+sapply(datos_exp[,c("OS_STATUS","OS_MONTHS","DSS_STATUS","DSS_MONTHS","DFS_STATUS","DFS_MONTHS","PFS_STATUS","PFS_MONTHS")], function(x) sum(is.na(x)))
+
+aggr(datos_exp[,c("OS_STATUS","OS_MONTHS","DSS_STATUS","DSS_MONTHS","DFS_STATUS","DFS_MONTHS","PFS_STATUS","PFS_MONTHS")], col = c("skyblue", "red"),prop=FALSE, numbers=TRUE,
+            cex.numbers=1, cex.axis=0.6, sortVars=TRUE,
+             ylab = c("NA histogram", "Patron"), gap=2, oma = c(7,2,1,1))
+
+table(datos_exp$OS_STATUS)
+table(datos_exp$DSS_STATUS)
+table(datos_exp$PFS_STATUS)
+
+# Nulos en los genes
+
+colnames(datos_exp)
+
+sapply(datos_exp[,c("ACTL6A","BMI1","CASP8","CCDC80","CDK4","CDKN2A","CLCA2","DENND2C","EXOSC4","FADD","FAT2","FOLH1","GCNT4","IL1B","IRF6","LUM","MAP3K7","MAP4K4","MFAP5","C17orf37","NDUFB10","NFKB1","NRG1","PAK2","PDGFD","PHLDA2","PI3","PLD5","PML","POF1B","PPP2R5A","PRKCZ","RELA","RFFL","RIPK1","RNF152","RUVBL1","SCEL","SERPINB2","SERPINB3","SKP2","SPINK7","SPRR1A","SPRR1B","SQSTM1","TAF12","TAF9","TLL1","TNFAIP3","TP63","XDH","ZBED2")], function(x) sum(is.na(x)))
+
+# sapply(datos_exp[,c("APC","TP53","KRAS","PIK3CA","FAT4","LRP1B")], function(x) sum(is.na(x)))
+
+# Elimino las variables "PLD5 y "SPINK7"
+
+datos_exp<-datos_exp[,-which(names(datos_exp) %in% c("PLD5", "SPINK7"))]
+
+sapply(datos_exp[,c("ACTL6A","BMI1","CASP8","CCDC80","CDK4","CDKN2A","CLCA2","DENND2C","EXOSC4","FADD","FAT2","FOLH1","GCNT4","IL1B","IRF6","LUM","MAP3K7","MAP4K4","MFAP5","C17orf37","NDUFB10","NFKB1","NRG1","PAK2","PDGFD","PHLDA2","PI3","PML","POF1B","PPP2R5A","PRKCZ","RELA","RFFL","RIPK1","RNF152","RUVBL1","SCEL","SERPINB2","SERPINB3","SKP2","SPRR1A","SPRR1B","SQSTM1","TAF12","TAF9","TLL1","TNFAIP3","TP63","XDH","ZBED2")], function(x) sum(is.na(x)))
+
+```
+
+# Correlation analysis
+
+```{r}
+
+temp<-datos_exp[,c("ACTL6A","BMI1","CASP8","CCDC80","CDK4","CDKN2A","CLCA2","DENND2C","EXOSC4","FADD","FAT2","FOLH1","GCNT4","IL1B","IRF6","LUM","MAP3K7","MAP4K4","MFAP5","C17orf37","NDUFB10","NFKB1","NRG1","PAK2","PDGFD","PHLDA2","PI3","PML","POF1B","PPP2R5A","PRKCZ","RELA","RFFL","RIPK1","RNF152","RUVBL1","SCEL","SERPINB2","SERPINB3","SKP2","SPRR1A","SPRR1B","SQSTM1","TAF12","TAF9","TLL1","TNFAIP3","TP63","XDH","ZBED2","OS_STATUS","OS_MONTHS","DSS_MONTHS","PFS_MONTHS")]
+
+vars<-c("ACTL6A","BMI1","CASP8","CCDC80","CDK4","CDKN2A","CLCA2","DENND2C","EXOSC4","FADD","FAT2","FOLH1","GCNT4","IL1B","IRF6","LUM","MAP3K7","MAP4K4","MFAP5","C17orf37","NDUFB10","NFKB1","NRG1","PAK2","PDGFD","PHLDA2","PI3","PML","POF1B","PPP2R5A","PRKCZ","RELA","RFFL","RIPK1","RNF152","RUVBL1","SCEL","SERPINB2","SERPINB3","SKP2","SPRR1A","SPRR1B","SQSTM1","TAF12","TAF9","TLL1","TNFAIP3","TP63","XDH","ZBED2")
+
+# Convierto las variables de los genes a tipo numérico
+
+temp[vars] <- sapply(temp[vars],as.numeric)
+
+str(temp)
+
+# Extraigo las correlaciones
+
+temp2<-temp[complete.cases(temp),]
+
+vars1<-c("ACTL6A","BMI1","CASP8","CCDC80","CDK4","CDKN2A","CLCA2","DENND2C","EXOSC4","FADD","OS_MONTHS")
+
+vars2<-c("FAT2","FOLH1","GCNT4","IL1B","IRF6","LUM","MAP3K7","MAP4K4","MFAP5","C17orf37","OS_MONTHS")
+
+vars3<-c("NDUFB10","NFKB1","NRG1","PAK2","PDGFD","PHLDA2","PI3","PML","POF1B","PPP2R5A","OS_MONTHS")
+
+vars4<-c("PRKCZ","RELA","RFFL","RIPK1","RNF152","RUVBL1","SCEL","SERPINB2","SERPINB3","SKP2","OS_MONTHS")
+
+vars5<-c("SPRR1A","SPRR1B","SQSTM1","TAF12","TAF9","TLL1","TNFAIP3","TP63","XDH","ZBED2","OS_MONTHS")
+
+
+corrplot(cor(temp2[,vars1], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+corrplot(cor(temp2[,vars2], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+corrplot(cor(temp2[,vars3], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+corrplot(cor(temp2[,vars4], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+corrplot(cor(temp2[,vars5], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+# Correlación sólo con los genes de la 18-gene signature
+
+temp<-datos_exp[,c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2", "CDKN2A", "SCEL","OS_MONTHS")]
+
+vars<-c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2", "CDKN2A", "SCEL")
+
+# Convierto las variables de los genes a tipo numérico
+
+temp[vars] <- sapply(temp[vars],as.numeric)
+
+str(temp)
+
+# Extraigo las correlaciones
+
+temp2<-temp[complete.cases(temp),]
+
+vars_18<-c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2", "CDKN2A", "SCEL","OS_MONTHS")
+
+corrplot(cor(temp2[,vars_18], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+
+```
+
+
+# Preparation of variables "AGE","SEX" and "STAGE"
+
+```{r}
+
+# Age
+
+summary(datos_exp$AGE)
+
+datos_exp$Range_Age<-cut(datos_exp$AGE, breaks=c(29,50,65,75,80,100), labels=c("30-49","50-64", "65-74", "75-79", "80-100"), right=TRUE)
+
+#datos_exp$Range_Age<-cut(datos_exp$AGE, breaks=c(29,65,75,100), labels=c("30-64","65-74","75-100"), right=TRUE)
+
+datos_exp$Range_Age<-as.factor(datos_exp$Range_Age)
+
+table(datos_exp$Range_Age)
+
+# Sex
+
+str(datos_exp$SEX)
+table(datos_exp$SEX)
+
+
+# Stage
+
+colnames(datos_exp)[which(names(datos_exp) == "AJCC_PATHOLOGIC_TUMOR_STAGE")] <- "STAGE"
+
+table(datos_exp$STAGE)
+
+# Cambio los niveles de todos los parentescos menos 'Hijo/a' y 'Cónyuge/Pareja' a 'Otros/as'
+lista<-levels(datos_exp$STAGE)
+lista_early<-lista[-c(1:6)]
+lista_late<-lista[-c(7:13)]
+
+levels(datos_exp$STAGE)[levels(datos_exp$STAGE) %in% lista_early]<-"Stage_I_II"
+levels(datos_exp$STAGE)[levels(datos_exp$STAGE) %in% lista_late]<-"Stage_III_IV"
+
+levels(datos_exp$STAGE)
+
+```
+
+# Exploratory analysis
+
+```{r}
+# Age
+
+levels<-levels(datos_rf$Range_Age)
+levels
+
+table(datos_rf$Range_Age)
+
+ggplot(datos_rf, aes(x= Range_Age,  group=Outcome)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+  geom_text(aes(label = scales::percent(..prop.., accuracy=0.1),
+                y= ..prop.. ), stat= "count", vjust = -.3, size=3.5) +
+  labs(title="Age Vs Outcome", y = "Porcentaje", fill="Age", x="") +
+  scale_fill_discrete(name="Age", labels=levels) +
+  facet_grid(~Outcome, labeller=label_both) +
+  scale_y_continuous(labels = scales::percent)+
+  theme(axis.text.x=element_blank(),axis.ticks.x = element_blank(), plot.title = element_text(hjust =0.5), panel.background = element_rect(fill='white'))
+
+
+##Statistic test
+
+chisq.test(datos_rf$Range_Age, datos_rf$Outcome)
+
+# Sex
+
+levels<-levels(datos_rf$SEX)
+levels
+
+ggplot(datos_rf, aes(x= SEX,  group=Outcome)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+  geom_text(aes(label = scales::percent(..prop.., accuracy=0.1),
+                y= ..prop.. ), stat= "count", vjust = -.3, size=3.5) +
+  labs(title="Sex Vs Outcome", y = "Porcentaje", fill="Sex", x="") +
+  scale_fill_discrete(name="Sex", labels=levels) +
+  facet_grid(~Outcome, labeller=label_both) +
+  scale_y_continuous(labels = scales::percent)+
+  theme(axis.text.x=element_blank(),axis.ticks.x = element_blank(), plot.title = element_text(hjust =0.5), panel.background = element_rect(fill='white'))
+
+
+##Statistic test
+
+chisq.test(datos_rf$SEX, datos_rf$Outcome)
+
+# Stage
+
+levels<-levels(datos_rf$STAGE)
+levels
+
+ggplot(datos_rf, aes(x= STAGE,  group=Outcome)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), stat="count") +
+  geom_text(aes(label = scales::percent(..prop.., accuracy=0.1),
+                y= ..prop.. ), stat= "count", vjust = -.3, size=3.5) +
+  labs(title="Stage Vs Outcome", y = "Porcentaje", fill="Stage", x="") +
+  scale_fill_discrete(name="Stage", labels=levels) +
+  facet_grid(~Outcome, labeller=label_both) +
+  scale_y_continuous(labels = scales::percent)+
+  theme(axis.text.x=element_blank(),axis.ticks.x = element_blank(), plot.title = element_text(hjust =0.5), panel.background = element_rect(fill='white'))
+
+
+##Statistic test
+
+chisq.test(datos_rf$STAGE, datos_rf$Outcome)
+
+nrow(datos_rf[which(is.na(datos_rf$STAGE) & datos_rf$Outcome=="Early_death"),])
+
+
+```
+
+
+# Model of multiple linear regresión for "OS_MONTHS"
+
+Sólo con aquellos genes que hayan superado el 10% de correlación
+
+```{r}
+
+datos_rl<-datos_exp[,c("AGE","SEX","STAGE","BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2","OS_MONTHS")]
+
+vars<-c("BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rl[vars] <- sapply(datos_rl[vars],as.numeric)
+
+str(datos_rl)
+
+# Genero el modelo
+
+colnames(datos_rl)
+names(datos_rl)[20]
+names(datos_rl)[-20]
+
+fla <- paste(names(datos_rl)[20], "~", paste(names(datos_rl)[-20], collapse=" + "))
+fla
+
+model<-glm(fla, data=datos_rl)
+summary(model)
+```
+
+# Model of multiple linear regression for "PFS_MONTHS"
+
+Sólo con aquellos genes que hayan superado el 10% de correlación
+
+```{r}
+
+datos_rl<-datos_exp[,c("BMI1","CLCA2","FADD","FOLH1","IL1B","LUM","MFAP5","NRG1","PAK2","PDGFD","PHLDA2","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2","PFS_MONTHS")]
+
+vars<-c("BMI1","CLCA2","FADD","FOLH1","IL1B","LUM","MFAP5","NRG1","PAK2","PDGFD","PHLDA2","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2","PFS_MONTHS")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rl[vars] <- sapply(datos_rl[vars],as.numeric)
+
+str(datos_rl)
+
+# Genero el modelo
+
+colnames(datos_rl)
+names(datos_rl)[20]
+names(datos_rl)[-20]
+
+fla <- paste(names(datos_rl)[20], "~", paste(names(datos_rl)[-20], collapse=" + "))
+fla
+
+model<-lm(fla, data=datos_rl)
+summary(model)
+```
+
+# Code for confusion matrix
+
+
+```{r confusion_matrix}
+draw_confusion_matrix <- function(cm) {
+
+  total <- sum(cm$table)
+  res <- as.numeric(cm$table)
+
+  # Generate color gradients. Palettes come from RColorBrewer.
+  greenPalette <- c("#F7FCF5","#E5F5E0","#C7E9C0","#A1D99B","#74C476","#41AB5D","#238B45","#006D2C","#00441B")
+  redPalette <- c("#FFF5F0","#FEE0D2","#FCBBA1","#FC9272","#FB6A4A","#EF3B2C","#CB181D","#A50F15","#67000D")
+  getColor <- function (greenOrRed = "green", amount = 0) {
+    if (amount == 0)
+      return("#FFFFFF")
+    palette <- greenPalette
+    if (greenOrRed == "red")
+      palette <- redPalette
+    colorRampPalette(palette)(100)[10 + ceiling(90 * amount / total)]
+  }
+
+  # set the basic layout
+  layout(matrix(c(1,1,2)))
+  par(mar=c(2,2,2,2))
+  plot(c(100, 345), c(300, 450), type = "n", xlab="", ylab="", xaxt='n', yaxt='n')
+  title('CONFUSION MATRIX', cex.main=2)
+
+  # create the matrix 
+  classes = colnames(cm$table)
+  rect(150, 430, 240, 370, col=getColor("green", res[1]))
+  text(195, 435, classes[1], cex=1.2)
+  rect(250, 430, 340, 370, col=getColor("red", res[3]))
+  text(295, 435, classes[2], cex=1.2)
+  text(125, 370, 'Predicted', cex=1.3, srt=90, font=2)
+  text(245, 450, 'Actual', cex=1.3, font=2)
+  rect(150, 305, 240, 365, col=getColor("red", res[2]))
+  rect(250, 305, 340, 365, col=getColor("green", res[4]))
+  text(140, 400, classes[1], cex=1.2, srt=90)
+  text(140, 335, classes[2], cex=1.2, srt=90)
+
+  # add in the cm results
+  text(195, 400, res[1], cex=1.6, font=2, col='white')
+  text(195, 335, res[2], cex=1.6, font=2, col='white')
+  text(295, 400, res[3], cex=1.6, font=2, col='white')
+  text(295, 335, res[4], cex=1.6, font=2, col='white')
+
+  # add in the specifics 
+  plot(c(100, 0), c(100, 0), type = "n", xlab="", ylab="", main = "DETAILS", xaxt='n', yaxt='n')
+  text(10, 85, names(cm$byClass[1]), cex=1.2, font=2)
+  text(10, 70, round(as.numeric(cm$byClass[1]), 3), cex=1.2)
+  text(30, 85, names(cm$byClass[2]), cex=1.2, font=2)
+  text(30, 70, round(as.numeric(cm$byClass[2]), 3), cex=1.2)
+  text(50, 85, names(cm$byClass[5]), cex=1.2, font=2)
+  text(50, 70, round(as.numeric(cm$byClass[5]), 3), cex=1.2)
+  text(70, 85, names(cm$byClass[6]), cex=1.2, font=2)
+  text(70, 70, round(as.numeric(cm$byClass[6]), 3), cex=1.2)
+  text(90, 85, names(cm$byClass[7]), cex=1.2, font=2)
+  text(90, 70, round(as.numeric(cm$byClass[7]), 3), cex=1.2)
+
+  # add in the accuracy information 
+  text(30, 35, names(cm$overall[1]), cex=1.5, font=2)
+  text(30, 20, round(as.numeric(cm$overall[1]), 3), cex=1.4)
+  text(70, 35, names(cm$overall[2]), cex=1.5, font=2)
+  text(70, 20, round(as.numeric(cm$overall[2]), 3), cex=1.4)
+}
+
+
+```
+
+
+
+# Random forest model (splitting "DECEASED" into 2 groups as per the median of "OS_MONTHS") including "sexo", "edad" y "stage"
+
+18 gene signature (>15% corr): "CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2", "CDKN2A", "SCEL"
+
+23-gene signature (>10% corr):"CCDC80","CLCA2","FOLH1","GCNT4","IL1B","LUM","MFAP5","NRG1","PDGFD","PHLDA2","PI3","PML","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TNFAIP3","TP63","ZBED2"
+
+
+
+```{r}
+colnames(datos_exp)
+
+table(datos_rf$Range_Age, datos_rf$Outcome)
+
+datos_rf<-datos_exp[,c("Range_Age","SEX","STAGE","CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2","CDKN2A","SCEL","OS_MONTHS")]
+
+vars_tot<-c("Range_Age","SEX","STAGE","CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2","CDKN2A","SCEL")
+
+vars<-c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2","CDKN2A","SCEL")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rf[vars] <- sapply(datos_rf[vars],as.numeric)
+
+str(datos_rf)
+
+# Preparo las clases "early_deceased" y "late_deceased" atentiendo a la mediana
+
+summary(datos_rf$OS_MONTHS)
+mediana<-median(datos_rf$OS_MONTHS)
+
+datos_rf<-datos_rf %>%
+  mutate(Outcome = ifelse(OS_MONTHS>median(datos_rf$OS_MONTHS), "Late_death","Early_death"))
+
+table(datos_rf$Outcome)
+
+# Convierto a tipo factor la variable clase
+
+datos_rf$Outcome[which(datos_rf$Outcome=='Early_death')]<-0
+datos_rf$Outcome[which(datos_rf$Outcome=='Late_death')]<-1
+
+datos_rf$Outcome<-as.factor(datos_rf$Outcome)
+
+# Elimino los registros que tienen algún valor nulo
+
+datos_rf_complete<-datos_rf[complete.cases(datos_rf[vars_tot]),]
+
+table(datos_rf_complete$Outcome)
+
+# Hago el split entre train y test
+
+train_index <- createDataPartition(datos_rf_complete $Outcome, p = .6, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- datos_rf_complete[train_index,]
+
+test  <- datos_rf_complete[-train_index,]
+
+table(train$Outcome)
+table(test$Outcome)
+
+# Binarizo las variables categóricas
+
+colnames(train)
+colnames(dummy)
+
+dummy<-fastDummies::dummy_cols(train[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+train_dummy<-cbind(dummy, train[,c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2","CDKN2A","SCEL","Outcome")])
+
+dummy<-fastDummies::dummy_cols(test[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+test_dummy<-cbind(dummy, test[,c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2","CDKN2A","SCEL","Outcome")])
+
+# Entreno el modelo
+
+table(train_dummy$Outcome)
+table(test_dummy$Outcome)
+
+trControl <- trainControl(method = "repeatedcv",
+    number = 3)
+    #repeats = 3)
+
+rf<- train(Outcome ~ .,
+      data = train_dummy,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 300,
+      #strata = train_dummy$Claudicacion,
+      #sampsize = c('1'=2381,'0'=2381),
+      na.action=na.omit)
+
+# Utilizando las variables enteras, sin dummys 
+
+# rf<- train(train[,1:21],
+#       train$Outcome,
+#       method = "rf",
+#       metric = "Accuracy",
+#       #tuneGrid = tuneGrid,
+#       trControl = trControl,
+#       importance = TRUE,
+#       #nodesize = 5,
+#       #maxnodes = 8,
+#       #ntree = 250,
+#       #strata = train1_dummy$Claudicacion_umbral3,
+#       #sampsize = c('1'=245,'0'=245),
+#       na.action=na.omit)
+rf
+
+# Hago la predicción sobre test3_dummy para confirmar las métricas de modelo
+
+pred <-predict(rf, test_dummy, na.action=na.omit)
+#pred <-predict(rf, test, na.action=na.omit)
+
+# Extraigo la matriz de confusión
+
+confMat<-confusionMatrix(pred, test_dummy$Outcome, positive="1")
+#confMat<-confusionMatrix(pred, test$Outcome,positive="1")
+
+confMat
+
+draw_confusion_matrix(confMat)
+
+# Importancia de las variables
+
+# importance <- varImp(rf,scale=TRUE)
+# 
+# print(importance)
+# plot(importance)
+
+```
+
+
+# RF model (splitting "DECEASED" into 2 groups as per the median of "OS_MONTHS"), with GENES ONLY
+
+
+```{r}
+colnames(datos_exp)
+
+datos_rf2<-datos_exp[,c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2", "CDKN2A", "SCEL","OS_MONTHS")]
+
+vars<-c("CLCA2","IL1B","MFAP5","NRG1","PDGFD","PHLDA2","RUVBL1","SERPINB2","SERPINB3","SPRR1A","SPRR1B","SQSTM1","TAF9","TLL1","TP63","ZBED2", "CDKN2A", "SCEL")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rf2[vars] <- sapply(datos_rf2[vars],as.numeric)
+
+str(datos_rf2)
+
+# Preparo las clases "early_deceased" y "late_deceased" atentiendo a la media
+
+summary(datos_rf2$OS_MONTHS)
+mediana<-median(datos_rf2$OS_MONTHS)
+
+datos_rf2<-datos_rf2 %>%
+  mutate(Outcome = ifelse(OS_MONTHS>median(datos_rf2$OS_MONTHS), "Early_death","Late_death"))
+
+table(datos_rf2$Outcome)
+
+# Convierto a tipo factor la variable clase
+
+datos_rf2$Outcome[which(datos_rf2$Outcome=='Early_death')]<-0
+datos_rf2$Outcome[which(datos_rf2$Outcome=='Late_death')]<-1
+
+datos_rf2$Outcome<-as.factor(datos_rf2$Outcome)
+
+# Elimino la columna "OS_MONTHS"
+
+colnames(datos_rf2)
+datos_rf2<-datos_rf2[,-19]
+
+# Elimino los registros que tienen algún valor nulo
+
+datos_rf2_complete<-datos_rf2[complete.cases(datos_rf2[vars]),]
+
+table(datos_rf2_complete$Outcome)
+
+# Hago el split entre train y test
+
+train_index <- createDataPartition(datos_rf2_complete $Outcome, p = .6, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- datos_rf2_complete[train_index,]
+
+test  <- datos_rf2_complete[-train_index,]
+
+table(train$Outcome)
+table(test$Outcome)
+
+# Entreno el modelo
+
+trControl <- trainControl(method = "repeatedcv",
+    number = 3,
+    repeats = 0)
+
+rf<- train(Outcome ~ .,
+      data = train,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 300,
+      #strata = train_dummy$Claudicacion, 
+      #sampsize = c('1'=2381,'0'=2381),
+      na.action=na.omit)
+
+rf
+
+# Hago la predicción sobre test3_dummy para confirmar las métricas de modelo
+
+pred <-predict(rf, test, na.action=na.omit)
+#pred <-predict(rf, test, na.action=na.omit)
+
+# Extraigo la matriz de confusión
+
+confMat<-confusionMatrix(pred, test$Outcome, positive="1")
+#confMat3<-confusionMatrix(pred3, test3$Claudicacion_umbral3,positive="1")
+confMat
+
+draw_confusion_matrix(confMat)
+
+# Importancia de las variables
+
+importance <- varImp(rf,scale=TRUE)
+
+print(importance)
+plot(importance)
+
+```
+
+
+# RF model (using as outcome: deceased Vs living) including "sexo", "edad" y "stage"
+
+
+```{r}
+#Age
+
+summary(datos_tot$AGE)
+
+datos_tot$Range_Age<-cut(datos_tot$AGE, breaks=c(29,50,65,75,80,100), labels=c("30-49","50-64", "65-74", "75-79", "80-100"), right=TRUE)
+
+datos_tot$Range_Age<-as.factor(datos_tot$Range_Age)
+
+table(datos_tot$Range_Age)
+
+# Sex
+
+str(datos_tot$SEX)
+table(datos_tot$SEX)
+
+
+# Stage
+
+colnames(datos_tot)[which(names(datos_tot) == "AJCC_PATHOLOGIC_TUMOR_STAGE")] <- "STAGE"
+
+table(datos_tot$STAGE)
+
+# Cambio los niveles de todos los parentescos menos 'Hijo/a' y 'Cónyuge/Pareja' a 'Otros/as'
+lista<-levels(datos_tot$STAGE)
+lista_early<-lista[-c(7:13)]
+lista_late<-lista[-c(1:6)]
+
+levels(datos_tot$STAGE)[levels(datos_tot$STAGE) %in% lista_early]<-"Stage_I_II"
+levels(datos_tot$STAGE)[levels(datos_tot$STAGE) %in% lista_late]<-"Stage_III_IV"
+
+levels(datos_tot$STAGE)
+
+table(datos_tot$OS_STATUS)
+
+
+```
+
+
+```{r}
+colnames(datos_tot)
+
+table(datos_tot$OS_STATUS)
+
+datos_rf<-datos_tot[,c("Range_Age","SEX","STAGE","BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2","OS_STATUS")]
+
+vars_tot<-c("Range_Age","SEX","STAGE","BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2")
+
+vars<-c("BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rf[vars] <- sapply(datos_rf[vars],as.numeric)
+
+str(datos_rf)
+
+# Estudio el tiempo
+
+# Convierto a tipo factor la variable clase
+
+str(datos_rf$OS_STATUS)
+
+datos_rf$OS_STATUS<-as.character(datos_rf$OS_STATUS)
+
+datos_rf$OS_STATUS[which(datos_rf$OS_STATUS=="0:LIVING")]<-0
+datos_rf$OS_STATUS[which(datos_rf$OS_STATUS=='1:DECEASED')]<-1
+
+datos_rf$OS_STATUS<-as.factor(datos_rf$OS_STATUS)
+
+# Elimino los registros que tienen algún valor nulo
+
+datos_rf_complete<-datos_rf[complete.cases(datos_rf[vars_tot]),]
+
+table(datos_rf_complete$OS_STATUS)
+
+# Balanceo
+
+living<-datos_rf_complete[which(datos_rf_complete$OS_STATUS==0),]
+deceased<-datos_rf_complete[which(datos_rf_complete$OS_STATUS==1),]
+
+nrow_deceased<-nrow(deceased)
+
+living<-living[sample(nrow(living), nrow_deceased),]
+
+rf_balanced <- rbind(living, deceased)
+
+# Hago el split entre train y test
+
+train_index <- createDataPartition(rf_balanced  $OS_STATUS, p = .6, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- rf_balanced [train_index,]
+
+test  <- rf_balanced [-train_index,]
+
+table(train$OS_STATUS)
+table(test$OS_STATUS)
+
+# Binarizo las variables categóricas
+
+colnames(train)
+colnames(dummy)
+
+dummy<-fastDummies::dummy_cols(train[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+train_dummy<-cbind(dummy, train[,c("BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2","OS_STATUS")])
+
+dummy<-fastDummies::dummy_cols(test[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+test_dummy<-cbind(dummy, test[,c("BMI1","CLCA2","FOLH1","GCNT4","NRG1","PDGFD","PHLDA2","RUVBL1","SCEL","SERPINB2","SERPINB3","SQSTM1","TAF9","TNFAIP3","TP63","ZBED2","OS_STATUS")])
+
+# Entreno el modelo
+
+table(train_dummy$OS_STATUS)
+table(test_dummy$OS_STATUS)
+
+trControl <- trainControl(method = "repeatedcv",
+    number = 3)
+    #repeats = 3)
+
+rf<- train(OS_STATUS ~ .,
+      data = train_dummy,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 300,
+      #strata = train_dummy$Claudicacion, 
+      #sampsize = c('1'=2381,'0'=2381),
+      na.action=na.omit)
+
+# Utilizando las variables enteras, sin dummys 
+
+# rf<- train(train[,1:19],
+#       train$Outcome,
+#       method = "rf",
+#       metric = "Accuracy",
+#       #tuneGrid = tuneGrid,
+#       trControl = trControl,
+#       importance = TRUE,
+#       #nodesize = 5,
+#       #maxnodes = 8,
+#       #ntree = 250,
+#       #strata = train1_dummy$Claudicacion_umbral3,
+#       #sampsize = c('1'=245,'0'=245),
+#       na.action=na.omit)
+rf
+
+# Hago la predicción sobre test3_dummy para confirmar las métricas de modelo
+
+pred <-predict(rf, test_dummy, na.action=na.omit)
+#pred <-predict(rf, test, na.action=na.omit)
+
+# Extraigo la matriz de confusión
+
+confMat<-confusionMatrix(pred, test_dummy$OS_STATUS, positive="1")
+#confMat3<-confusionMatrix(pred3, test3$Claudicacion_umbral3,positive="1")
+confMat
+
+draw_confusion_matrix(confMat)
+
+# Importancia de las variables
+
+importance <- varImp(rf,scale=TRUE)
+
+print(importance)
+plot(importance)
+   
+```
+
+# Evaluate predictive power of Other gene signatures: 6-gene signature, Zuo et al, 2019
+
+Zuo et al, 2019: 6-gene signature: "ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1"
+
+```{r}
+# Nulos en los genes
+
+colnames(datos_exp)
+
+sapply(datos_exp[,c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1")], function(x) sum(is.na(x)))
+
+```
+
+
+```{r}
+colnames(datos_exp)
+
+datos_rf<-datos_exp[,c("Range_Age","SEX","STAGE","ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1","OS_MONTHS")]
+
+vars_tot<-c("Range_Age","SEX","STAGE","ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1")
+
+vars<-c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rf[vars] <- sapply(datos_rf[vars],as.numeric)
+
+str(datos_rf)
+
+# Preparo las clases "early_deceased" y "late_deceased" atentiendo a la media
+
+summary(datos_rf$OS_MONTHS)
+mediana<-median(datos_rf$OS_MONTHS)
+
+datos_rf<-datos_rf %>%
+  mutate(Outcome = ifelse(OS_MONTHS>median(datos_rf$OS_MONTHS), "Early_death","Late_death"))
+
+table(datos_rf$Outcome)
+
+# Convierto a tipo factor la variable clase
+
+datos_rf$Outcome[which(datos_rf$Outcome=='Early_death')]<-0
+datos_rf$Outcome[which(datos_rf$Outcome=='Late_death')]<-1
+
+datos_rf$Outcome<-as.factor(datos_rf$Outcome)
+
+# Elimino los registros que tienen algún valor nulo
+
+datos_rf_complete<-datos_rf[complete.cases(datos_rf[vars_tot]),]
+
+table(datos_rf_complete$Outcome)
+
+# Hago el split entre train y test
+
+train_index <- createDataPartition(datos_rf_complete $Outcome, p = .6, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- datos_rf_complete[train_index,]
+
+test  <- datos_rf_complete[-train_index,]
+
+table(train$Outcome)
+table(test$Outcome)
+
+# Binarizo las variables categóricas
+
+colnames(train)
+#colnames(dummy)
+
+dummy<-fastDummies::dummy_cols(train[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+train_dummy<-cbind(dummy, train[,c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1","Outcome")])
+
+dummy<-fastDummies::dummy_cols(test[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+test_dummy<-cbind(dummy, test[,c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1","Outcome")])
+
+# Entreno el modelo
+
+table(train_dummy$Outcome)
+table(test_dummy$Outcome)
+
+trControl <- trainControl(method = "repeatedcv",
+    number = 3)
+    #repeats = 3)
+
+rf<- train(Outcome ~ .,
+      data = train_dummy,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 300,
+      #strata = train_dummy$Claudicacion, 
+      #sampsize = c('1'=2381,'0'=2381),
+      na.action=na.omit)
+
+# Utilizando las variables enteras, sin dummys 
+
+# rf<- train(train[,1:19],
+#       train$Outcome,
+#       method = "rf",
+#       metric = "Accuracy",
+#       #tuneGrid = tuneGrid,
+#       trControl = trControl,
+#       importance = TRUE,
+#       #nodesize = 5,
+#       #maxnodes = 8,
+#       #ntree = 250,
+#       #strata = train1_dummy$Claudicacion_umbral3,
+#       #sampsize = c('1'=245,'0'=245),
+#       na.action=na.omit)
+rf
+
+# Hago la predicción sobre test3_dummy para confirmar las métricas de modelo
+
+pred <-predict(rf, test_dummy, na.action=na.omit)
+#pred <-predict(rf, test, na.action=na.omit)
+
+# Extraigo la matriz de confusión
+
+confMat<-confusionMatrix(pred, test_dummy$Outcome, positive="1")
+#confMat3<-confusionMatrix(pred3, test3$Claudicacion_umbral3,positive="1")
+confMat
+
+draw_confusion_matrix(confMat)
+
+# Importancia de las variables
+
+importance <- varImp(rf,scale=TRUE)
+
+print(importance)
+plot(importance)
+
+```
+
+# Evaluate predictive power of Other gene signatures: 12-gene signature, Pei et al, 2020
+
+Pei et al, 2020: 12-gene signature: "CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK"
+
+```{r}
+# Nulos en los genes
+
+colnames(datos_exp)
+
+sapply(datos_exp[,c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK")], function(x) sum(is.na(x)))
+
+```
+
+
+```{r}
+colnames(datos_exp)
+
+datos_rf<-datos_exp[,c("Range_Age","SEX","STAGE","CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK","OS_MONTHS")]
+
+vars_tot<-c("Range_Age","SEX","STAGE","CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK")
+
+vars<-c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rf[vars] <- sapply(datos_rf[vars],as.numeric)
+
+str(datos_rf)
+
+# Preparo las clases "early_deceased" y "late_deceased" atentiendo a la media
+
+summary(datos_rf$OS_MONTHS)
+mediana<-median(datos_rf$OS_MONTHS)
+
+datos_rf<-datos_rf %>%
+  mutate(Outcome = ifelse(OS_MONTHS>median(datos_rf$OS_MONTHS), "Early_death","Late_death"))
+
+table(datos_rf$Outcome)
+
+# Convierto a tipo factor la variable clase
+
+datos_rf$Outcome[which(datos_rf$Outcome=='Early_death')]<-0
+datos_rf$Outcome[which(datos_rf$Outcome=='Late_death')]<-1
+
+datos_rf$Outcome<-as.factor(datos_rf$Outcome)
+
+# Elimino los registros que tienen algún valor nulo
+
+datos_rf_complete<-datos_rf[complete.cases(datos_rf[vars_tot]),]
+
+table(datos_rf_complete$Outcome)
+
+# Hago el split entre train y test
+
+train_index <- createDataPartition(datos_rf_complete $Outcome, p = .6, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- datos_rf_complete[train_index,]
+
+test  <- datos_rf_complete[-train_index,]
+
+table(train$Outcome)
+table(test$Outcome)
+
+# Binarizo las variables categóricas
+
+colnames(train)
+#colnames(dummy)
+
+dummy<-fastDummies::dummy_cols(train[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+train_dummy<-cbind(dummy, train[,c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK","Outcome")])
+
+dummy<-fastDummies::dummy_cols(test[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+test_dummy<-cbind(dummy, test[,c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK","Outcome")])
+
+# Entreno el modelo
+
+table(train_dummy$Outcome)
+table(test_dummy$Outcome)
+
+trControl <- trainControl(method = "repeatedcv",
+    number = 3)
+    #repeats = 3)
+
+rf<- train(Outcome ~ .,
+      data = train_dummy,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 300,
+      #strata = train_dummy$Claudicacion, 
+      #sampsize = c('1'=2381,'0'=2381),
+      na.action=na.omit)
+
+# Utilizando las variables enteras, sin dummys 
+
+# rf<- train(train[,1:19],
+#       train$Outcome,
+#       method = "rf",
+#       metric = "Accuracy",
+#       #tuneGrid = tuneGrid,
+#       trControl = trControl,
+#       importance = TRUE,
+#       #nodesize = 5,
+#       #maxnodes = 8,
+#       #ntree = 250,
+#       #strata = train1_dummy$Claudicacion_umbral3,
+#       #sampsize = c('1'=245,'0'=245),
+#       na.action=na.omit)
+rf
+
+# Hago la predicción sobre test3_dummy para confirmar las métricas de modelo
+
+pred <-predict(rf, test_dummy, na.action=na.omit)
+#pred <-predict(rf, test, na.action=na.omit)
+
+# Extraigo la matriz de confusión
+
+confMat<-confusionMatrix(pred, test_dummy$Outcome, positive="1")
+#confMat3<-confusionMatrix(pred3, test3$Claudicacion_umbral3,positive="1")
+confMat
+
+draw_confusion_matrix(confMat)
+
+# Importancia de las variables
+
+importance <- varImp(rf,scale=TRUE)
+
+print(importance)
+plot(importance)
+
+```
+
+# Evaluate predictive power of Other gene signatures: 20-gene signature, Pece et al, 2019
+
+Pece et al, 2019: 20-gene signature: "THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SNF","TOP2A"
+
+```{r}
+# Nulos en los genes
+
+colnames(datos_exp)
+
+sapply(datos_exp[,c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A")], function(x) sum(is.na(x)))
+
+```
+
+
+```{r}
+colnames(datos_exp)
+
+datos_rf<-datos_exp[,c("Range_Age","SEX","STAGE","THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A","OS_MONTHS")]
+
+vars_tot<-c("Range_Age","SEX","STAGE","THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A")
+
+vars<-c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A")
+
+# Convierto las variables de los genes a tipo numérico
+
+datos_rf[vars] <- sapply(datos_rf[vars],as.numeric)
+
+str(datos_rf)
+
+# Preparo las clases "early_deceased" y "late_deceased" atentiendo a la media
+
+summary(datos_rf$OS_MONTHS)
+mediana<-median(datos_rf$OS_MONTHS)
+
+datos_rf<-datos_rf %>%
+  mutate(Outcome = ifelse(OS_MONTHS>median(datos_rf$OS_MONTHS), "Early_death","Late_death"))
+
+table(datos_rf$Outcome)
+
+# Convierto a tipo factor la variable clase
+
+datos_rf$Outcome[which(datos_rf$Outcome=='Early_death')]<-0
+datos_rf$Outcome[which(datos_rf$Outcome=='Late_death')]<-1
+
+datos_rf$Outcome<-as.factor(datos_rf$Outcome)
+
+# Elimino los registros que tienen algún valor nulo
+
+datos_rf_complete<-datos_rf[complete.cases(datos_rf[vars_tot]),]
+
+table(datos_rf_complete$Outcome)
+
+# Hago el split entre train y test
+
+train_index <- createDataPartition(datos_rf_complete $Outcome, p = .6, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- datos_rf_complete[train_index,]
+
+test  <- datos_rf_complete[-train_index,]
+
+table(train$Outcome)
+table(test$Outcome)
+
+# Binarizo las variables categóricas
+
+colnames(train)
+#colnames(dummy)
+
+dummy<-fastDummies::dummy_cols(train[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+train_dummy<-cbind(dummy, train[,c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A","Outcome")])
+
+dummy<-fastDummies::dummy_cols(test[c("Range_Age","SEX","STAGE")])
+dummy<-dummy[,-c(1:3)]
+dummy<-dummy[,-which(names(dummy) %in% c("SEX_Male","STAGE_Stage_III_IV"))]
+test_dummy<-cbind(dummy, test[,c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A","Outcome")])
+
+# Entreno el modelo
+
+table(train_dummy$Outcome)
+table(test_dummy$Outcome)
+
+trControl <- trainControl(method = "repeatedcv",
+    number = 3)
+    #repeats = 3)
+
+rf<- train(Outcome ~ .,
+      data = train_dummy,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 300,
+      #strata = train_dummy$Claudicacion, 
+      #sampsize = c('1'=2381,'0'=2381),
+      na.action=na.omit)
+
+# Utilizando las variables enteras, sin dummys 
+
+rf<- train(train[,1:21],
+      train$Outcome,
+      method = "rf",
+      metric = "Accuracy",
+      #tuneGrid = tuneGrid,
+      trControl = trControl,
+      importance = TRUE,
+      #nodesize = 5,
+      #maxnodes = 8,
+      #ntree = 250,
+      #strata = train1_dummy$Claudicacion_umbral3,
+      #sampsize = c('1'=245,'0'=245),
+      na.action=na.omit)
+rf
+
+# Hago la predicción sobre test3_dummy para confirmar las métricas de modelo
+
+pred <-predict(rf, test_dummy, na.action=na.omit)
+pred <-predict(rf, test, na.action=na.omit)
+
+# Extraigo la matriz de confusión
+
+confMat<-confusionMatrix(pred, test_dummy$Outcome, positive="1")
+#confMat3<-confusionMatrix(pred3, test3$Claudicacion_umbral3,positive="1")
+confMat
+
+draw_confusion_matrix(confMat)
+
+# Importancia de las variables
+
+importance <- varImp(rf,scale=TRUE)
+
+print(importance)
+plot(importance)
+
+```
+
+# Correlation study of genes in signatures: 6-gene signature (Zuo et al, 2019)
+
+```{r}
+colnames(datos_exp)
+
+temp<-datos_exp[,c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1","OS_STATUS","OS_MONTHS","DSS_MONTHS","PFS_MONTHS")]
+
+vars<-c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1")
+
+# Convierto las variables de los genes a tipo numérico
+
+temp[vars] <- sapply(temp[vars],as.numeric)
+
+str(temp)
+
+# Extraigo las correlaciones
+
+temp2<-temp[complete.cases(temp),]
+
+vars1<-c("ART5","EPHA6","FOXD1","HIST3H2BB","IRX6","TIMP1","OS_MONTHS","DSS_MONTHS","PFS_MONTHS")
+
+corrplot(cor(temp2[,vars1], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+
+```
+
+
+# Correlation study of genes in signatures: 12-gene signature (Pei et al, 2020)
+
+```{r}
+temp<-datos_exp[,c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK","OS_STATUS","OS_MONTHS")]
+
+vars<-c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK")
+
+# Convierto las variables de los genes a tipo numérico
+
+temp[vars] <- sapply(temp[vars],as.numeric)
+
+str(temp)
+
+# Extraigo las correlaciones
+
+temp2<-temp[complete.cases(temp),]
+
+vars1<-c("CCNB2","CDC20","CENPA","EXO1","FOXM1","KIF4A","PLK1","RAD54L","SGOL1","SKA1","TPX2","TTK","OS_MONTHS")
+
+corrplot(cor(temp2[,vars1], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+
+```
+
+
+# Correlation study of genes in signatures: 20-gene signature (Pece et al, 2019)
+
+```{r}
+temp<-datos_exp[,c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A","OS_STATUS","OS_MONTHS","DSS_MONTHS","PFS_MONTHS")]
+
+vars<-c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A")
+
+# Convierto las variables de los genes a tipo numérico
+
+temp[vars] <- sapply(temp[vars],as.numeric)
+
+str(temp)
+
+# Extraigo las correlaciones
+
+temp2<-temp[complete.cases(temp),]
+
+vars1<-c("THOC4","APOBEC3B","CDK1","CENPW","EIF4EBP1","EPB41L5","EXOSC4","H2AFJ","H2AFZ","LY6E","OS_MONTHS")
+
+vars2<-c("C17orf37","MMP1","MRPS23","NDUFB10","NOL3","PHB","PHLDA2","RACGAP1","SFN","TOP2A","OS_MONTHS")
+
+corrplot(cor(temp2[,vars1], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+corrplot(cor(temp2[,vars2], method= "pearson"), method="color",type="upper",tl.col="black", tl.cex=0.6, tl.srt=45,addCoef.col="black",number.cex=0.7)
+
+
+```
+
+
